@@ -1,0 +1,366 @@
+esphome:
+  name: uvc-water4
+  friendly_name: uvc_water4
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: arduino
+
+logger:
+
+# Set a unique code here so that other things can't connect to the API
+
+api:
+  encryption:
+    key: "xxxxxxxxxxxxxxxxxxx"
+
+# Set a password here that's used for Over the Air code updates
+
+ota:
+  - platform: esphome
+    password: "xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Networks can be defined here
+
+wifi:
+  networks :
+    - ssid: !secret wifi_ssid
+      password: !secret wifi_password
+
+  ap:
+    ssid: "Uvc-Water4 Fallback Hotspot"
+    password: "cijvgXinp0bc"
+
+# Let's set up a web inteface so it's eady to view the results
+
+web_server:
+  port: 80
+  log: false
+
+captive_portal:
+
+
+
+
+# ------------------------------
+# Global Variables
+# ------------------------------
+globals:
+  - id: pump_speed_value
+    type: float
+    restore_value: no
+    initial_value: "0.75"
+
+  - id: pump_on
+    type: bool
+    restore_value: yes
+    initial_value: "true"
+
+  - id: rotary_position
+    type: int
+    restore_value: no
+    initial_value: "0"
+
+  - id: prev_val
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+
+
+# ------------------------------
+# I2C is used for the power monitoring, we need to initialize it first
+# ------------------------------
+
+i2c:
+  sda: GPIO03
+  scl: GPIO08
+  scan: true
+
+# ------------------------------
+# We'll initialize the LEDs as an On-Off output, the pump can be controlled with GPIO (and we'll use the ledc platform to do the hardware PWM)
+# ------------------------------
+output:
+  - platform: gpio
+    pin: GPIO10
+    id: gpio_leds
+
+  - platform: ledc
+    pin: GPIO11
+    channel: 1  # Pump on channel 1
+    id: pump_pwm_output
+
+
+light:
+  - platform: binary
+    name: "UVC LEDs"
+    output: gpio_leds
+    id: leds_light
+
+
+
+
+# ------------------------------
+# The pump won't allow PWM to do all the way down to zero, it seems to cut off around 40%, so we'll rescale the slider to make it run from 0 to 100, but run the PWM from 40 to 100
+# ------------------------------
+number:
+  - platform: template
+    name: "Pump Speed Control"
+    id: pump_speed
+    min_value: 0
+    max_value: 100
+    step: 1
+    optimistic: true
+    set_action:
+      then:
+        - lambda: |-
+            float scaled_speed = 0.4 + (x / 100.0 * 0.6);
+            if (id(pump_on)) {
+              id(pump_pwm_output).set_level(scaled_speed);
+            } else {
+              id(pump_pwm_output).set_level(0);
+            }
+            id(pump_speed_value) = scaled_speed;
+            
+# ------------------------------
+# We'll initialize the LEDs as an On-Off output, the pump can be controlled with GPIO (and we'll use the ledc platform to do the hardware PWM)
+# ------------------------------
+switch:
+  - platform: template
+    name: "Pump On/Off"
+    id: pump_switch
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    turn_on_action:
+      - lambda: |-
+          id(pump_on) = true;
+          id(pump_pwm_output).set_level(id(pump_speed_value));
+    turn_off_action:
+      - lambda: |-
+          id(pump_on) = false;
+          id(pump_pwm_output).set_level(0);
+
+
+
+# ------------------------------
+# Rotary Encoder isn't used right now, but we'll initialize the push button
+# ------------------------------
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO18
+      mode: INPUT_PULLUP
+      inverted: true
+    filters:
+      - delayed_on: 30ms
+      - delayed_off: 30ms
+    name: "Push Button"
+
+
+# ------------------------------
+# Rotary Encoder isn't used right now, but it might be later!
+# ------------------------------
+sensor:
+  - platform: rotary_encoder
+    name: "Rotary Encoder"
+    restore_mode: ALWAYS_ZERO
+    pin_a:
+      number: GPIO17
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    pin_b:
+      number: GPIO16
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    resolution: 1
+    filters:
+      - debounce: 0.1s
+      - lambda: |-
+          if (abs(x - id(prev_val)) > 10) {
+          id(prev_val) = x;  // Update internal value, even if we drop
+          return {};         // Still drop the output
+          } else {
+          id(prev_val) = x;
+          return x;
+          }
+
+# ------------------------------
+# We'll use the ESP32's hardware pulse counter to calculate the flow rate
+# ------------------------------
+
+  - platform: pulse_counter
+    id: flow_pulse_counter
+    name: "Flow Pulse Count"
+    pin:
+      number: GPIO01
+      mode: INPUT_PULLUP
+    internal_filter: 13us
+    update_interval: 1s
+    count_mode:
+      rising_edge: INCREMENT
+      falling_edge: DISABLE
+    total:
+      name: "Total Water Pulses"
+
+      id: total_water_pulses
+
+
+# ------------------------------
+# Each pulse of the Hall Effect Flow Rate sensor is 1.45ml of water, we we'll convert that to liters
+# ------------------------------
+
+
+  - platform: template
+    name: "Flow Rate"
+    id: flow_rate_sensor
+    unit_of_measurement: "L/min"
+    accuracy_decimals: 2
+    update_interval: 1s
+    lambda: |-
+      return id(flow_pulse_counter).state * (1.45 )/1000;
+
+
+# ------------------------------
+# Format Pump speed for display
+# ------------------------------
+
+
+  - platform: template
+    name: "Pump Speed Actual"
+    lambda: |-
+      return id(pump_speed_value) * 100;
+    update_interval: 1s
+
+    
+# ------------------------------
+# For Total Water dispensed, we'll just count the total number of pulses
+# ------------------------------
+
+
+  - platform: template
+    name: "Total Water Dispensed"
+    id: total_dispensed_ml
+    unit_of_measurement: "mL"
+    accuracy_decimals: 0
+    update_interval: 1s
+    lambda: |-
+      return id(total_water_pulses).state * 1.45;
+
+
+# ------------------------------
+# Our INA3221 power moniotring board, leverages the I2C connection and monitors the pwoer draw from the LEDs and Motor
+# I had hoped I could detect if the motor was running dry by its power draw, but this doesn't seem possible (at least with the pump I'm using)
+# ESPHome will handle all the i2c stuff, calculations for shunt resistence and preeset the calculated values
+# ------------------------------
+  - platform: ina3221
+    address: 0x40  # Default I2C Address when none of the address select lines are tied high or low
+    update_interval: 1s
+
+    channel_1:
+      shunt_resistance: 0.1 ohm
+      power:
+        name: "Pump Power Draw"
+        id: pump_power_draw
+
+    channel_2:
+      shunt_resistance: 0.1 ohm
+      power:
+        name: "UVC LEDs Power Draw"
+        id: uvc_leds_power_draw
+
+    channel_3:
+      shunt_resistance: 0.1 ohm
+      power:
+        name: "System Power"
+        id: system_power
+      bus_voltage:
+        name: "System Bus Voltage"
+        id: system_bus_voltage
+
+
+# ------------------------------
+# The waveshare display uses SPI. We'll update it every second and use a code block to render the necessary pieces
+# ------------------------------
+spi:
+  clk_pin: GPIO47
+  mosi_pin: GPIO48
+display:
+  - platform: waveshare_epaper
+    id: my_display_component
+    cs_pin: GPIO21
+    dc_pin: GPIO20
+    busy_pin: GPIO12
+    reset_pin: GPIO13
+    rotation: 90°
+    model: 2.90inv2-r2
+    full_update_every: 180
+    auto_clear_enabled: false
+    update_interval: 1s
+    lambda: |-
+        it.fill(COLOR_OFF);
+
+        // Header
+        it.printf(5, 5, id(myFont), COLOR_ON, "UVC Water");
+        it.printf(160, 10, id(smallFont), COLOR_ON, "%s", WiFi.localIP().toString().c_str());
+
+        // Left Column
+        int y = 30;
+        int line_height = 15;
+
+        // Flow Rate
+        it.printf(5, y, id(smallFont), COLOR_ON, "Flow Rate");
+        it.printf(70, y, id(smallFont), COLOR_ON, "%.2f", id(flow_rate_sensor).state);
+        it.printf(110, y, id(smallFont), COLOR_ON, "L/min");
+        y += line_height;
+
+        // Pump Status
+        it.printf(5, y, id(smallFont), COLOR_ON, "Pump");
+        it.printf(70, y, id(smallFont), COLOR_ON, "%s", id(pump_on) ? "ON" : "OFF");
+        y += line_height;
+
+        // Pump Speed
+        it.printf(5, y, id(smallFont), COLOR_ON, "Speed");
+        it.printf(70, y, id(smallFont), COLOR_ON, "%.1f", id(pump_speed_value) * 100);
+        it.printf(110, y, id(smallFont), COLOR_ON, "%%");
+        y += line_height + 5;
+
+        // Right Column
+        int x_label = 160;
+        int x_value = 210;
+        int x_unit  = 255;
+        y = 30;
+
+        it.printf(x_label, y, id(smallFont), COLOR_ON, "Pump");
+        it.printf(x_value, y, id(smallFont), COLOR_ON, "%.2f", id(pump_power_draw).state);
+        it.printf(x_unit, y, id(smallFont), COLOR_ON, "W");
+        y += line_height;
+
+        it.printf(x_label, y, id(smallFont), COLOR_ON, "LED");
+        it.printf(x_value, y, id(smallFont), COLOR_ON, "%.2f", id(uvc_leds_power_draw).state);
+        it.printf(x_unit, y, id(smallFont), COLOR_ON, "W");
+        y += line_height;
+
+        it.printf(x_label, y, id(smallFont), COLOR_ON, "System");
+        it.printf(x_value, y, id(smallFont), COLOR_ON, "%.2f", id(system_power).state);
+        it.printf(x_unit, y, id(smallFont), COLOR_ON, "W");
+        y += line_height;
+
+        it.printf(x_label, y, id(smallFont), COLOR_ON, "Bus V");
+        it.printf(x_value, y, id(smallFont), COLOR_ON, "%.2f", id(system_bus_voltage).state);
+        it.printf(x_unit, y, id(smallFont), COLOR_ON, "V");
+
+# ------------------------------
+# Fonts
+# ------------------------------
+font:
+  - file: "fonts/PPNeueBit-Bold.otf"
+    id: myFont
+    size: 25
+
+  - file: "fonts/spleen-6x12.bdf"
+    id: smallFont
