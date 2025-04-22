@@ -1,6 +1,6 @@
 ## ESPHome Project
 
-I'm a big fan of ESPHome - it's a nice tech stack for building small devices that use the Espressif ESP code
+I'm a big fan of ESPHome - it's a nice tech stack for building small devices that use the Espressif ESP micro-controllers
 
 ## Setting up ESPHome
 ```
